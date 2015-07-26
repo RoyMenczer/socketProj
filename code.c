@@ -7,14 +7,13 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
-#include <arpa/inet.h> 
+#include <arpa/inet.h>
 #include <sys/wait.h>
 #include <signal.h>
 
 #define PORT "1771" //arbitrary port number
 #define BACKLOG 10
 #define BUFFER_SIZE 1000
-
 
 int main(int argc, char *argv[]) //1 variable? 2?
 {
@@ -113,7 +112,7 @@ int server_func()
 
 // --------- THE client.c CODE ----------
 
-int client_func(char *msg)
+int client_func(char *msg, char *serv_addr)
 {
 	int msg_len=strlen(msg);
 	int sockfd, bytes_sent, bytes_received;
@@ -123,7 +122,10 @@ int client_func(char *msg)
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
-	///
+	if (getaddrinfo(serv_addr, PORT, &hints, &servinfo) != 0) {
+		perror("getaddrinfo failed");
+		return -1;
+	}
 	
 	for(p = servinfo; p != NULL; p = p->ai_next) {
 		sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);

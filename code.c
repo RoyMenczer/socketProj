@@ -29,26 +29,33 @@ int server_func()
 	struct sockaddr_storage client_addr;
 	socklen_t sin_size;
 	char buffer[BUFFER_SIZE];
-	///
+	int yes=1;
+	int rv, bytes_received, bytes_sent;
 
-	memseset(&hints, 0, sizeof(hints));
+	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
 
 	if (getaddrinfo(NULL, PORT, &hints, &servinfo) != 0) {
-		fprintf("getaddrinfo failed\n");
+		perror("getaddrinfo failed");
 		return -1;	
 	}
 	for (p = servinfo; p != NULL; p = p->ai_next) {
 
 		listen_sock=socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if(listen_fd == -1) {
+		if(listen_sock == -1) {
 			perror("server: socket");
 			continue;
 		}
-		///
-		if(bind(listen_sock, p->ai_addr, p->ai_addrlen) == -1) {
+		rv = setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+		if (rv == -1) {
+			perror("server: setsockopt");
+			close(listen_sock);
+			freeaddrinfo(servinfo);
+			return -1;
+		}
+		if (bind(listen_sock, p->ai_addr, p->ai_addrlen) == -1) {
  			close(listen_sock);
 			perror("server: bind");
 			continue;
@@ -56,28 +63,51 @@ int server_func()
 
 		break; //if we got here - we binded successfully
 	}
-	if(p == NULL) { //if all binds failed
+	if (p == NULL) { //if all binds failed
 		fprintf(stderr, "server: failed to bind\n");
 		return -1;
 	}
 	freeaddrinfo(servinfo);
-	if(listen(listen_sock, BACKLOG) == -1) {
+	if (listen(listen_sock, BACKLOG) == -1) {
 		perror("listen");
 		close(listen_sock);
 		return -1;
 	}
-	///
+
 	printf("server: listening...\n");
 	
-	while(1) { //accept() loop
+	while (1) { //accept() loop
 		sin_size = sizeof(client_addr);
-		new_fd = accept(sockfd, (struct sockaddr *)&client_addr, &sin_size);
-		if(new_fd == -1) {
+		new_fd = accept(listen_sock, (struct sockaddr *)&client_addr, &sin_size);
+		if (new_fd == -1) {
 			perror("accept");
 			continue;
 		}
+		bytes_received=recv(new_fd, buffer, BUFFER_SIZE-1, 0);
+		if (bytes_received == -1) {
+			perror("recv");
+			close(new_fd);
+			close(listen_sock);
+			return -1;
+		}
+		bytes_sent = send(new_fd, "received: ", 10, 0);
+		if (bytes_sent == -1) {
+			perror("send");
+			close(new_fd);
+			close(listen_sock);
+			return -1;
+		} //FIXME: handle case where not all were sent?
+		bytes_sent = send(new_fd, buffer, bytes_received, 0);
+		if (bytes_sent == -1) {
+			perror("send");
+			close(new_fd);
+			close(listen_sock);
+			return -1;
+		} //FIXME: handle case where not all were sent?
+		close(new_fd);
+
 	}
-	
+	close(listen_sock);
 	return 0;
 }
 

@@ -13,7 +13,7 @@
 
 #define PORT "1771" //arbitrary port number
 #define BACKLOG 10
-#define BUFFSIZE 1000
+#define BUFFER_SIZE 1000
 
 
 int main(int argc, char *argv[]) //1 variable? 2?
@@ -28,7 +28,7 @@ int server_func()
 	struct addrinfo hints, *servinfo, *p;
 	struct sockaddr_storage client_addr;
 	socklen_t sin_size;
-	char *buf;
+	char buffer[BUFFER_SIZE];
 	///
 
 	memseset(&hints, 0, sizeof(hints));

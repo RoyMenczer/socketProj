@@ -151,10 +151,10 @@ int client_func(char *msg, char *serv_addr)
 	freeaddrinfo(servinfo);	
 	bytes_sent=send(sockfd, msg, msg_len, 0);	
 	//FIXME: handle case where not all were sent (or -1), and is 0 ok?
-	bytes_received=recv(sockfd, buffer, BUFFER_SIZE, 0);
+	bytes_received=recv(sockfd, buffer, BUFFER_SIZE-1, 0);
 	//FIXME: is 0 ok? check for -1
 	buffer[bytes_received]='\0';
-	printf("client: received '%s'\n",buffer);
+	printf("\nreply from server\n '%s'\n\n",buffer);
 	close(sockfd);
 	return 0;
 }

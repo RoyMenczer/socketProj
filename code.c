@@ -113,4 +113,46 @@ int server_func()
 
 // --------- THE client.c CODE ----------
 
+int client_func(char *msg)
+{
+	int msg_len=strlen(msg);
+	int sockfd, bytes_sent, bytes_received;
+	char buffer[BUFFER_SIZE];
+	struct addrinfo hints, *servinfo, *p;
 
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	///
+	
+	for(p = servinfo; p != NULL; p = p->ai_next) {
+		sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+		if (sockfd == -1) {
+			perror("client: socket");
+			continue;
+		}
+		
+		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+			close(sockfd);
+			perror("client: connect");
+			continue;
+		}
+		
+		break;
+	}
+	
+	if(p == NULL) {
+		fprintf(stderr, "client: failed to connect\n");
+		return -1;
+	}
+	///
+	freeaddrinfo(servinfo);	
+	bytes_sent=send(sockfd, msg, msg_len, 0);	
+	//FIXME: handle case where not all were sent (or -1), and is 0 ok?
+	bytes_received=recv(sockfd, buffer, BUFFER_SIZE, 0);
+	//FIXME: is 0 ok? check for -1
+	buffer[bytes_received]='\0';
+	printf("client: received '%s'\n",buffer);
+	close(sockfd);
+	return 0;
+}

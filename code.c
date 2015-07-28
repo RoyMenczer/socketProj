@@ -11,28 +11,30 @@
 #include <sys/wait.h>
 #include <signal.h>
 
-#define PORT "1771" //arbitrary port number
 #define BACKLOG 10
 #define BUFFER_SIZE 1000
 
+/*
+input: <"server" or "client">  <port-number> <host-name> <msg to send (if client)>
+*/
 int main(int argc, char *argv[])
 {
-	if (strcmp(argv[1], "1") == 0) 
-		return server_func();
+	if (strcmp(argv[1], "server") == 0)
+		return server_func(argv[2]);
 
-	else	
-		return client_func(argv[2], "rain8");
+	else
+		return client_func(argv[4], argv[3], argv[2]);
 }
 // --------- THE server.c CODE ---------
 
-int server_func()
+int server_func(const char *port)
 {
 	int listen_sock, new_fd;
 	struct addrinfo hints, *servinfo, *p;
 	struct sockaddr_storage client_addr;
 	socklen_t sin_size;
 	char buffer[BUFFER_SIZE];
-	int yes=1;
+	const int yes = 1;
 	int rv, bytes_received, bytes_sent;
 
 	memset(&hints, 0, sizeof(hints));
@@ -40,7 +42,7 @@ int server_func()
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
 
-	if (getaddrinfo(NULL, PORT, &hints, &servinfo) != 0) {
+	if (getaddrinfo(NULL, port, &hints, &servinfo) != 0) {
 		perror("getaddrinfo failed");
 		return -1;	
 	}
@@ -116,7 +118,7 @@ int server_func()
 
 // --------- THE client.c CODE ----------
 
-int client_func(char *msg, char *serv_addr)
+int client_func(const char *msg, const char *serv_addr, const char *port)
 {
 	int msg_len=strlen(msg);
 	int sockfd, bytes_sent, bytes_received;
@@ -126,7 +128,7 @@ int client_func(char *msg, char *serv_addr)
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
-	if (getaddrinfo(serv_addr, PORT, &hints, &servinfo) != 0) {
+	if (getaddrinfo(serv_addr, port, &hints, &servinfo) != 0) {
 		perror("getaddrinfo failed");
 		return -1;
 	}

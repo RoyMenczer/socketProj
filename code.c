@@ -88,27 +88,29 @@ int server_func(const char *port)
 			perror("accept");
 			continue;
 		}
-		bytes_received=recv(new_fd, buffer, BUFFER_SIZE-1, 0);
-		if (bytes_received == -1) {
-			perror("recv");
-			close(new_fd);
-			close(listen_sock);
-			return -1;
+		while (1) {
+			bytes_received=recv(new_fd, buffer, BUFFER_SIZE-1, 0);
+			if (bytes_received == -1) {
+				perror("recv");
+				close(new_fd);
+				close(listen_sock);
+				return -1;
+			}
+			bytes_sent = send(new_fd, "received: ", 10, 0);
+			if (bytes_sent == -1) {
+				perror("send");
+				close(new_fd);
+				close(listen_sock);
+				return -1;
+			} //FIXME: handle case where not all were sent?
+			bytes_sent = send(new_fd, buffer, bytes_received, 0);
+			if (bytes_sent == -1) {
+				perror("send");
+				close(new_fd);
+				close(listen_sock);
+				return -1;
+			} //FIXME: handle case where not all were sent?
 		}
-		bytes_sent = send(new_fd, "received: ", 10, 0);
-		if (bytes_sent == -1) {
-			perror("send");
-			close(new_fd);
-			close(listen_sock);
-			return -1;
-		} //FIXME: handle case where not all were sent?
-		bytes_sent = send(new_fd, buffer, bytes_received, 0);
-		if (bytes_sent == -1) {
-			perror("send");
-			close(new_fd);
-			close(listen_sock);
-			return -1;
-		} //FIXME: handle case where not all were sent?
 		close(new_fd);
 
 	}
@@ -154,13 +156,14 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 		return -1;
 	}
 	///
-	freeaddrinfo(servinfo);	
-	bytes_sent=send(sockfd, msg, msg_len, 0);	
-	//FIXME: handle case where not all were sent (or -1), and is 0 ok?
-	bytes_received=recv(sockfd, buffer, BUFFER_SIZE-1, 0);
-	//FIXME: is 0 ok? check for -1
-	buffer[bytes_received]='\0';
-	printf("\nreply from server\n '%s'\n\n",buffer);
+	freeaddrinfo(servinfo);
+	while (1) {
+		bytes_sent=send(sockfd, msg, msg_len, 0);	
+		//FIXME: handle case where not all were sent (or -1), and is 0 ok?
+		bytes_received=recv(sockfd, buffer, BUFFER_SIZE-1, 0);
+		//FIXME: is 0 ok? check for -1
+		printf("\nreply from server\n '%*.*s'\n\n",bytes_received, bytes_received, buffer);
+	}
 	close(sockfd);
 	return 0;
 }

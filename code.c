@@ -15,9 +15,13 @@
 #define BACKLOG 10
 #define BUFFER_SIZE 1000
 
-int main(int argc, char *argv[]) //1 variable? 2?
+int main(int argc, char *argv[])
 {
-	return 0;	
+	if (strcmp(argv[1], "1") == 0) 
+		return server_func();
+
+	else	
+		return client_func(argv[2], "rain8");
 }
 // --------- THE server.c CODE ---------
 

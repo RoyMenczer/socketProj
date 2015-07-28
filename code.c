@@ -10,7 +10,10 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <poll.h>
 
+#define TIMEOUT (60 * 1000)
+#define MAX_SIZE 1021
 #define BACKLOG 10
 #define BUFFER_SIZE 1000
 
@@ -31,11 +34,11 @@ int server_func(const char *port)
 {
 	int listen_sock, new_fd;
 	struct addrinfo hints, *servinfo, *p;
-	struct sockaddr_storage client_addr;
-	socklen_t sin_size;
+	struct pollfd fds[MAX_SIZE+1];
 	char buffer[BUFFER_SIZE];
 	const int yes = 1;
 	int rv, bytes_received, bytes_sent;
+	int i, poll_rv, curr_size=0, num_of_fds=1;
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
@@ -79,40 +82,64 @@ int server_func(const char *port)
 		return -1;
 	}
 
+	memset(fds, 0, sizeof(fds));
+	fds[0].fd = listen_sock;
+	fds[0].events = POLLIN;	
+
 	printf("server: listening...\n");
 	
-	while (1) { //accept() loop
-		sin_size = sizeof(client_addr);
-		new_fd = accept(listen_sock, (struct sockaddr *)&client_addr, &sin_size);
-		if (new_fd == -1) {
-			perror("accept");
+	while (1) {
+		poll_rv = poll(fds, num_of_fds, TIMEOUT);
+		if (poll_rv < 0) {
+			perror("server: poll");
+			close(listen_sock); //FIXME: more sockets may be open
+			return -1;
+		}
+		if (poll_rv == 0) {
+			printf("poll timed out\n");
 			continue;
 		}
-		while (1) {
-			bytes_received=recv(new_fd, buffer, BUFFER_SIZE-1, 0);
-			if (bytes_received == -1) {
-				perror("recv");
-				close(new_fd);
-				close(listen_sock);
-				return -1;
+		curr_size = num_of_fds;
+		for (i = 0; i < curr_size; i++) { //FIXME: handle HUP and other problems
+			if ((fds[i].fd == listen_sock) && (num_of_fds < (MAX_SIZE + 1))) { //FIXME: off by one?
+				new_fd = accept(listen_sock, NULL, NULL);
+				if (new_fd < 0) {
+					perror("error: accept");
+					close(listen_sock);
+					return -1; //FIXME: more sockets may be open
+				}
+				printf("new connection\n");
+				fds[num_of_fds].fd = new_fd;
+				fds[num_of_fds].events = POLLIN | POLLOUT;
+				num_of_fds++;
+				continue;
 			}
-			bytes_sent = send(new_fd, "received: ", 10, 0);
-			if (bytes_sent == -1) {
-				perror("send");
-				close(new_fd);
-				close(listen_sock);
-				return -1;
-			} //FIXME: handle case where not all were sent?
-			bytes_sent = send(new_fd, buffer, bytes_received, 0);
-			if (bytes_sent == -1) {
-				perror("send");
-				close(new_fd);
-				close(listen_sock);
-				return -1;
-			} //FIXME: handle case where not all were sent?
+			if (fds[i].revents & POLLIN) {
+				bytes_received=recv(new_fd, buffer, BUFFER_SIZE-1, 0);
+				if (bytes_received == -1) {
+					perror("recv");
+					close(new_fd);
+					close(listen_sock); //FIXME: more sockets may be open
+					return -1;
+				}
+			}
+			if (fds[i].revents & POLLOUT) {
+				bytes_sent = send(new_fd, "received: ", 10, 0);
+				if (bytes_sent == -1) {
+					perror("send");
+					close(new_fd);
+					close(listen_sock); //FIXME: more sockets may be open
+					return -1;
+				} //FIXME: handle case where not all were sent?
+				bytes_sent = send(new_fd, buffer, bytes_received, 0);
+				if (bytes_sent == -1) {
+					perror("send");
+					close(new_fd);
+					close(listen_sock);//FIXME: more sockets may be open
+					return -1;
+				} //FIXME: handle case where not all were sent?
+			}
 		}
-		close(new_fd);
-
 	}
 	close(listen_sock);
 	return 0;
@@ -163,6 +190,7 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 		bytes_received=recv(sockfd, buffer, BUFFER_SIZE-1, 0);
 		//FIXME: is 0 ok? check for -1
 		printf("\nreply from server\n '%*.*s'\n\n",bytes_received, bytes_received, buffer);
+		sleep(15);
 	}
 	close(sockfd);
 	return 0;

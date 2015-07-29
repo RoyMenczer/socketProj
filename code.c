@@ -13,9 +13,17 @@
 #include <poll.h>
 
 #define TIMEOUT (5 * 1000)
-#define MAX_SIZE 1021
+#define MAX_SESSIONS 1021
 #define BACKLOG 10
-#define BUFFER_SIZE 1000
+#define MSG_SIZE 64
+
+struct session {
+	int state;
+	char r_msg[MSG_SIZE];
+	char s_msg[MSG_SIZE + 10];
+	int s_index;
+	int bytes_received;
+};
 
 /*
 input: <"server" or "client">  <port-number> <host-name> <msg to send (if client)>
@@ -34,10 +42,10 @@ int server_func(const char *port)
 {
 	int listen_sock, new_fd;
 	struct addrinfo hints, *servinfo, *p;
-	struct pollfd fds[MAX_SIZE+1];
-	char buffer[BUFFER_SIZE], response[BUFFER_SIZE + 10];
+	struct session sessions[MAX_SESSIONS + 1];
+	struct pollfd fds[MAX_SESSIONS+1];
 	const int yes = 1;
-	int rv, bytes_received, bytes_sent;
+	int rv, bytes_sent;
 	int i, poll_rv, curr_size=0, num_of_fds=1, flag = 0;
 
 	memset(&hints, 0, sizeof(hints));
@@ -85,7 +93,10 @@ int server_func(const char *port)
 	memset(fds, 0, sizeof(fds));
 	fds[0].fd = listen_sock;
 	fds[0].events = POLLIN;	
-
+	for (i = 1; i < MAX_SESSIONS + 1; i++) {
+		fds[i].fd = -1;
+		sessions[i].state = -1;
+	}
 	printf("server: listening...\n");
 	while (flag == 0) {
 		poll_rv = poll(fds, num_of_fds, TIMEOUT);
@@ -99,6 +110,8 @@ int server_func(const char *port)
 		}
 		curr_size = num_of_fds;
 		for (i = 0; i < curr_size; i++) {
+			if(fds[i].revents == 0)
+				continue;
 			if(fds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) {
 				if(fds[i].fd == listen_sock) {
 					flag = -1;
@@ -108,9 +121,10 @@ int server_func(const char *port)
 				printf("problem with connection number %d. closing socket\n",i);
 				close(fds[i].fd);
 				fds[i].fd = -1;
+				sessions[i].state = -1;
 			}
 			else {
-				if ((fds[i].fd == listen_sock) && (fds[i].revents & POLLIN) && (num_of_fds < (MAX_SIZE + 1))) {
+				if ((fds[i].fd == listen_sock) && (fds[i].revents & POLLIN) && (num_of_fds < (MAX_SESSIONS + 1))) {
 					new_fd = accept(listen_sock, NULL, NULL);
 					if (new_fd < 0) {
 						perror("server: accept");
@@ -120,26 +134,42 @@ int server_func(const char *port)
 					printf("new connection\n");
 					fds[num_of_fds].fd = new_fd;
 					fds[num_of_fds].events = POLLIN;
-					num_of_fds++;				
+					sessions[num_of_fds].state = 0;
+					num_of_fds++;
 				}
 				else {
-					if (fds[i].revents & POLLIN) {
-						memset(buffer, '\0', sizeof(buffer));
-						bytes_received=recv(fds[i].fd, buffer, BUFFER_SIZE-1, 0);
-						if (bytes_received == -1) {
-							return -1;
+					if ((fds[i].revents == POLLIN) && (sessions[i].state == 0)) {
+						memset(sessions[i].r_msg, '\0', sizeof(MSG_SIZE));
+						sessions[i].bytes_received = recv(fds[i].fd, sessions[i].r_msg, MSG_SIZE - 1, 0);
+						if (sessions[i].bytes_received == -1) {
+							flag = -1;
 							break;
 						}
-						memset(response, '\0', sizeof(response));
-						strcpy(response, "received: ");
-						strcat(response, buffer);
-						bytes_sent = send(fds[i].fd, response, 10 + bytes_received, 0);
+						sessions[i].state = 1;
+						fds[i].events = POLLOUT;
+						fds[i].revents = 0;
+						continue;
+					}
+					if ((fds[i].revents == POLLOUT) && (sessions[i].state == 1)) {
+						memset(sessions[i].s_msg, '\0', sizeof(MSG_SIZE + 10));
+						strcpy(sessions[i].s_msg, "received: ");
+						strcat(sessions[i].s_msg, sessions[i].r_msg);
+						bytes_sent = send(fds[i].fd, sessions[i].s_msg, 10 + sessions[i].bytes_received, 0);
 						if (bytes_sent == -1) {
 							perror("send");
 							flag = -1;
 							break;
 						} //FIXME: handle case where not all were sent?
-
+						sessions[i].state = 0;
+						fds[i].events = POLLIN;
+						fds[i].revents = 0;
+						continue;
+					}
+					else {
+						printf("unexpected event at session number %d. closing socket\n",i);
+						close(fds[i].fd);
+						fds[i].fd = -1;
+						sessions[i].state = -1;
 					}
 /*					if (fds[i].revents & POLLOUT) {
 						memset(response, '\0', sizeof(response));
@@ -153,9 +183,8 @@ int server_func(const char *port)
 							return -1;
 						} //FIXME: handle case where not all were sent?
 					}*/
-				} 
+				}
 			}
-			fds[i].revents = 0;
 		}
 	}
 	for (i = 0; i < num_of_fds; i++) 
@@ -170,7 +199,7 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 {
 	int msg_len=strlen(msg);
 	int sockfd, bytes_sent, bytes_received;
-	char buffer[BUFFER_SIZE];
+	char buffer[MSG_SIZE + 10];
 	struct addrinfo hints, *servinfo, *p;
 
 	memset(&hints, 0, sizeof(hints));
@@ -205,12 +234,14 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 	freeaddrinfo(servinfo);
 
 	while (1) {
+		memset(buffer, '\0', MSG_SIZE + 10);
 		bytes_sent=send(sockfd, msg, msg_len, 0);
 		printf("sent\n");//FIXME: !!!!!!!!!!!!!!!!!!	
 		//FIXME: handle case where not all were sent (or -1), and is 0 ok?
-		bytes_received=recv(sockfd, buffer, BUFFER_SIZE-1, 0);
+		bytes_received=recv(sockfd, buffer, MSG_SIZE-1, 0);
+		buffer[bytes_received] = '\0';
 		//FIXME: is 0 ok? check for -1
-		printf("\nreply from server\n '%*.*s'\n\n",bytes_received, bytes_received, buffer);
+		printf("\nreply from server\n '%s'\n\n", buffer);
 		sleep(10);
 	}
 	close(sockfd);

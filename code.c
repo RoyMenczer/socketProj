@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <poll.h>
+#include <fcntl.h>
 
 #define TIMEOUT (5 * 1000)
 #define MAX_SESSIONS 1021
@@ -20,7 +21,7 @@
 struct session {
 	int state;
 	char r_msg[MSG_SIZE];
-	char s_msg[MSG_SIZE + 10];
+	char s_msg[MSG_SIZE + 11];
 	int s_index;
 	int bytes_received;
 };
@@ -45,7 +46,7 @@ int server_func(const char *port)
 	struct session sessions[MAX_SESSIONS + 1];
 	struct pollfd fds[MAX_SESSIONS+1];
 	const int yes = 1;
-	int rv, bytes_sent;
+	int rv;
 	int i, poll_rv, curr_size=0, num_of_fds=1, flag = 0;
 
 	memset(&hints, 0, sizeof(hints));
@@ -63,6 +64,11 @@ int server_func(const char *port)
 		if(listen_sock == -1) {
 			perror("server: socket");
 			continue;
+		}
+		if (fcntl(listen_sock, F_SETFL, O_NONBLOCK) < 0) {
+			perror("server: listen_sock fcntl");
+			close(listen_sock);
+			return -1;
 		}
 		rv = setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
 		if (rv == -1) {
@@ -96,6 +102,7 @@ int server_func(const char *port)
 	for (i = 1; i < MAX_SESSIONS + 1; i++) {
 		fds[i].fd = -1;
 		sessions[i].state = -1;
+		sessions[i].s_index = -1;
 	}
 	printf("server: listening...\n");
 	while (flag == 0) {
@@ -131,6 +138,11 @@ int server_func(const char *port)
 						flag = -1;
 						break;
 					}
+					if (fcntl(new_fd, F_SETFL, O_NONBLOCK) < 0) {
+						perror("server: fcntl");
+						flag = -1;
+						break;
+					}
 					printf("new connection\n");
 					fds[num_of_fds].fd = new_fd;
 					fds[num_of_fds].events = POLLIN;
@@ -154,8 +166,9 @@ int server_func(const char *port)
 						memset(sessions[i].s_msg, '\0', sizeof(MSG_SIZE + 10));
 						strcpy(sessions[i].s_msg, "received: ");
 						strcat(sessions[i].s_msg, sessions[i].r_msg);
-						bytes_sent = send(fds[i].fd, sessions[i].s_msg, 10 + sessions[i].bytes_received, 0);
-						if (bytes_sent == -1) {
+						strcat(sessions[i].s_msg, "0");
+						sessions[i].s_index = send(fds[i].fd, sessions[i].s_msg, 10 + sessions[i].bytes_received, 0);
+						if (sessions[i].s_index == -1) {
 							perror("send");
 							flag = -1;
 							break;
@@ -197,9 +210,10 @@ int server_func(const char *port)
 
 int client_func(const char *msg, const char *serv_addr, const char *port)
 {
-	int msg_len=strlen(msg);
+	int msg_len=strlen(msg), rv, success = 1;
 	int sockfd, bytes_sent, bytes_received;
-	char buffer[MSG_SIZE + 10];
+	char buffer[MSG_SIZE + 11];
+	char s_msg[MSG_SIZE + 1];
 	struct addrinfo hints, *servinfo, *p;
 
 	memset(&hints, 0, sizeof(hints));
@@ -216,14 +230,25 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 			perror("client: socket");
 			continue;
 		}
-		
-		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-			close(sockfd);
-			perror("client: connect");
+		if (fcntl(sockfd, F_SETFL, O_NONBLOCK) < 0) {
+			perror("client: fcntl");
 			continue;
 		}
-		
-		break;
+		while (1) {
+			rv = connect(sockfd, p->ai_addr, p->ai_addrlen);
+			if (rv == -1) {
+				if (errno != EWOULDBLOCK) {
+					perror("client: connect");
+					break;
+				}
+			}
+			else {
+				success = 1;
+				break;
+			}
+		}
+		if (success == 1)
+			break;
 	}
 	
 	if(p == NULL) {
@@ -234,15 +259,18 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 	freeaddrinfo(servinfo);
 
 	while (1) {
+		memset(s_msg, '\0', MSG_SIZE + 1);
+		strcpy(s_msg, msg);
+		strcat(s_msg, "0");
 		memset(buffer, '\0', MSG_SIZE + 10);
-		bytes_sent=send(sockfd, msg, msg_len, 0);
+		bytes_sent=send(sockfd, s_msg, msg_len + 1, 0);
 		printf("sent\n");//FIXME: !!!!!!!!!!!!!!!!!!	
 		//FIXME: handle case where not all were sent (or -1), and is 0 ok?
-		bytes_received=recv(sockfd, buffer, MSG_SIZE-1, 0);
-		buffer[bytes_received] = '\0';
+		bytes_received=recv(sockfd, buffer, MSG_SIZE - 1, 0);
+		buffer[bytes_received - 1] = '\0';
 		//FIXME: is 0 ok? check for -1
 		printf("\nreply from server\n '%s'\n\n", buffer);
-		sleep(10);
+		sleep(5);
 	}
 	close(sockfd);
 	return 0;

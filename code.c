@@ -102,7 +102,10 @@ int server_func(const char *port)
 	for (i = 1; i < MAX_SESSIONS + 1; i++) {
 		fds[i].fd = -1;
 		sessions[i].state = -1;
-		sessions[i].s_index = -1;
+		sessions[i].s_index = 0;
+		sessions[i].bytes_received = 0;
+		memset(sessions[i].s_msg, '\0', sizeof(sessions[i].s_msg));
+		memset(sessions[i].r_msg, '\0', sizeof(sessions[i].r_msg));
 	}
 	printf("server: listening...\n");
 	while (flag == 0) {
@@ -116,7 +119,7 @@ int server_func(const char *port)
 			continue;
 		}
 		curr_size = num_of_fds;
-		for (i = 0; i < curr_size; i++) {
+		for (i = 0; i < curr_size; i++) {	
 			if(fds[i].revents == 0)
 				continue;
 			if(fds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) {
@@ -133,7 +136,7 @@ int server_func(const char *port)
 			else {
 				if ((fds[i].fd == listen_sock) && (fds[i].revents & POLLIN) && (num_of_fds < (MAX_SESSIONS + 1))) {
 					new_fd = accept(listen_sock, NULL, NULL);
-					if (new_fd < 0) {
+					if (new_fd < 0 && (errno != EWOULDBLOCK)) {
 						perror("server: accept");
 						flag = -1;
 						break;
@@ -150,31 +153,49 @@ int server_func(const char *port)
 					num_of_fds++;
 				}
 				else {
-					if ((fds[i].revents == POLLIN) && (sessions[i].state == 0)) {
-						memset(sessions[i].r_msg, '\0', sizeof(MSG_SIZE));
-						sessions[i].bytes_received = recv(fds[i].fd, sessions[i].r_msg, MSG_SIZE - 1, 0);
-						if (sessions[i].bytes_received == -1) {
-							flag = -1;
-							break;
+					if ((fds[i].revents == POLLIN) && (sessions[i].state == 0)) {						
+						rv = recv(fds[i].fd, (sessions[i].r_msg + sessions[i].bytes_received), MSG_SIZE + 1 - sessions[i].bytes_received, 0);
+						if (rv == -1) {
+							if (errno == EWOULDBLOCK) {
+								fds[i].revents = 0;
+								continue;
+							}
+							else {
+								flag = -1;
+								break;
+							}
 						}
-						sessions[i].state = 1;
-						fds[i].events = POLLOUT;
+						sessions[i].bytes_received += rv;
+						if (sessions[i].r_msg[sessions[i].bytes_received - 1] == '0') {
+							sessions[i].state = 1;
+							fds[i].events = POLLOUT;
+							strcpy(sessions[i].s_msg, "received: ");
+							strcat(sessions[i].s_msg, sessions[i].r_msg);
+							memset(sessions[i].r_msg, '\0', sizeof(sessions[i].r_msg));
+						}
 						fds[i].revents = 0;
 						continue;
 					}
 					if ((fds[i].revents == POLLOUT) && (sessions[i].state == 1)) {
-						memset(sessions[i].s_msg, '\0', sizeof(MSG_SIZE + 10));
-						strcpy(sessions[i].s_msg, "received: ");
-						strcat(sessions[i].s_msg, sessions[i].r_msg);
-						strcat(sessions[i].s_msg, "0");
-						sessions[i].s_index = send(fds[i].fd, sessions[i].s_msg, 10 + sessions[i].bytes_received, 0);
-						if (sessions[i].s_index == -1) {
-							perror("send");
-							flag = -1;
-							break;
-						} //FIXME: handle case where not all were sent?
-						sessions[i].state = 0;
-						fds[i].events = POLLIN;
+						rv = send(fds[i].fd, (sessions[i].s_msg + sessions[i].s_index), 10 + sessions[i].bytes_received - sessions[i].s_index, 0);
+						if (rv == -1) {
+							if (errno == EWOULDBLOCK) {
+								fds[i].revents = 0;
+								continue;
+							}
+							else {
+								flag = -1;
+								break;
+							}
+						}
+						sessions[i].s_index += rv;
+						if (sessions[i].s_msg[sessions[i].s_index -1] == '0') {
+							sessions[i].state = 0;
+							fds[i].events = POLLIN;
+							sessions[i].s_index = 0;
+							memset(sessions[i].s_msg, '\0', sizeof(sessions[i].s_msg));
+							sessions[i].bytes_received = 0;
+						}
 						fds[i].revents = 0;
 						continue;
 					}
@@ -184,18 +205,6 @@ int server_func(const char *port)
 						fds[i].fd = -1;
 						sessions[i].state = -1;
 					}
-/*					if (fds[i].revents & POLLOUT) {
-						memset(response, '\0', sizeof(response));
-						strcpy(response, "received: ");
-						strcat(response, buffer);
-						bytes_sent = send(new_fd, response, 10 + bytes_received, 0);
-						if (bytes_sent == -1) {
-							perror("send");
-							close(new_fd);
-							close(listen_sock); //FIXME: more sockets may be open
-							return -1;
-						} //FIXME: handle case where not all were sent?
-					}*/
 				}
 			}
 		}
@@ -210,7 +219,7 @@ int server_func(const char *port)
 
 int client_func(const char *msg, const char *serv_addr, const char *port)
 {
-	int msg_len=strlen(msg), rv, success = 1;
+	int msg_len=strlen(msg), rv, success = 1, res = 0, flag = 0;
 	int sockfd, bytes_sent, bytes_received;
 	char buffer[MSG_SIZE + 11];
 	char s_msg[MSG_SIZE + 1];
@@ -258,20 +267,50 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 	///
 	freeaddrinfo(servinfo);
 
-	while (1) {
+	while (flag == 0) {
+		bytes_sent = 0;
+		bytes_received = 0;
 		memset(s_msg, '\0', MSG_SIZE + 1);
 		strcpy(s_msg, msg);
 		strcat(s_msg, "0");
 		memset(buffer, '\0', MSG_SIZE + 10);
-		bytes_sent=send(sockfd, s_msg, msg_len + 1, 0);
-		printf("sent\n");//FIXME: !!!!!!!!!!!!!!!!!!	
-		//FIXME: handle case where not all were sent (or -1), and is 0 ok?
-		bytes_received=recv(sockfd, buffer, MSG_SIZE - 1, 0);
+		while (s_msg[bytes_sent -1] != '0') {
+			res = send(sockfd, (s_msg + bytes_sent), msg_len + 1 - bytes_sent, 0);
+			if (res == -1) {
+				perror("client:");
+				if (errno != EWOULDBLOCK) {
+					perror("client: send");
+					flag == -1;
+					break;
+				}
+			}
+			else
+				bytes_sent += res;
+			sleep(5);
+		}
+		if (flag == -1)
+			break;
+		printf("sent\n");
+		while (buffer[bytes_received -1] != '0') {
+			res = recv(sockfd, (buffer + bytes_received), MSG_SIZE + 11 - bytes_received, 0);
+			if (res == -1) {
+				perror("");
+				if(errno != EWOULDBLOCK) {
+					perror("client: recv");
+					flag == -1;
+					break;
+				}
+			}
+			else
+				bytes_received += res;
+//			sleep(5);
+		}
+		if (flag == -1)
+			break;
 		buffer[bytes_received - 1] = '\0';
-		//FIXME: is 0 ok? check for -1
 		printf("\nreply from server\n '%s'\n\n", buffer);
-		sleep(5);
+//		sleep(5);
 	}
 	close(sockfd);
-	return 0;
+	return flag;
 }

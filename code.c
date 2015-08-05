@@ -14,7 +14,7 @@
 #include <fcntl.h>
 
 #include <rdma/rsocket.h>
-
+#include <infiniband/ib.h>
 
 #define TIMEOUT (5 * 1000)
 #define MAX_SESSIONS 1021
@@ -238,7 +238,7 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 	
 	for(p = servinfo; p != NULL; p = p->ai_next) {
 		rsockfd = rsocket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if (sockfd == -1) {
+		if (rsockfd == -1) {
 			perror("client: rsocket");
 			continue;
 		}
@@ -247,7 +247,7 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 			continue;
 		}
 		while (1) {
-			rv = rconnect(sockfd, p->ai_addr, p->ai_addrlen);
+			rv = rconnect(rsockfd, p->ai_addr, p->ai_addrlen);
 			if (rv == -1) {
 				if (errno != EWOULDBLOCK) {
 					perror("client: connect");
@@ -278,7 +278,7 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 		strcat(s_msg, "0");
 		memset(buffer, '\0', MSG_SIZE + 10);
 		while (s_msg[bytes_sent -1] != '0') {
-			res = rsend(sockfd, (s_msg + bytes_sent), msg_len + 1 - bytes_sent, 0);
+			res = rsend(rsockfd, (s_msg + bytes_sent), msg_len + 1 - bytes_sent, 0);
 			if (res == -1) {
 				perror("client:");
 				if (errno != EWOULDBLOCK) {
@@ -295,7 +295,7 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 			break;
 		printf("sent\n");
 		while (buffer[bytes_received -1] != '0') {
-			res = rrecv(sockfd, (buffer + bytes_received), MSG_SIZE + 11 - bytes_received, 0);
+			res = rrecv(rsockfd, (buffer + bytes_received), MSG_SIZE + 11 - bytes_received, 0);
 			if (res == -1) {
 				perror("");
 				if(errno != EWOULDBLOCK) {
@@ -314,6 +314,6 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 		printf("\nreply from server\n '%s'\n\n", buffer);
 //		sleep(5);
 	}
-	rclose(sockfd);
+	rclose(rsockfd);
 	return flag;
 }

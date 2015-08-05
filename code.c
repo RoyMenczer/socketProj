@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/param.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -30,69 +31,83 @@ struct session {
 };
 
 /*
-input: <"server" or "client">  <port-number> <host-name> <msg to send (if client)>
+input: <"server" or "client">  <port-number> <host-gid> <msg to send (if client)>
 */
 int main(int argc, char *argv[])
 {
 	if (strcmp(argv[1], "server") == 0)
-		return server_func(argv[2]);
+		return server_func(argv[2], argv[3]);
 
 	else
 		return client_func(argv[4], argv[3], argv[2]);
 }
+
+
+uint64_t htonll(uint64_t n)
+{
+#if __BYTE_ORDER == __BIG_ENDIAN
+    return n; 
+#else
+    return (((uint64_t)htonl(n)) << 32) + htonl(n >> 32);
+#endif
+}
+
 // --------- THE server.c CODE ---------
 
-int server_func(const char *port)
+int server_func(const char *port, const char *address)
 {
 	int listen_rsock = -1, new_fd = -1;
-	struct addrinfo hints, *servinfo, *p;
 	struct session sessions[MAX_SESSIONS + 1];
 	struct pollfd fds[MAX_SESSIONS+1];
 	const int yes = 1;
 	int rv;
 	int i, poll_rv, curr_size=0, num_of_fds=1, flag = 0;
+	uint16_t pkey = 0xffff;	//from admin_connect_init
+	struct sockaddr_ib addr;
+	int port_num;
+	union ibv_gid dgid;
 
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_IB;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_flags = AI_PASSIVE;
-
-	if (getaddrinfo(NULL, port, &hints, &servinfo) != 0) {
-		perror("getaddrinfo failed");
-		return -1;	
-	}
-	for (p = servinfo; p != NULL; p = p->ai_next) {
-
-		listen_rsock=rsocket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if(listen_rsock == -1) {
-			perror("server: rsocket");
-			continue;
-		}
-		if (fcntl(listen_rsock, F_SETFL, O_NONBLOCK) < 0) {
-			perror("server: listen_rsock fcntl");
-			rclose(listen_rsock);
-			return -1;
-		}
-		rv = rsetsockopt(listen_rsock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
-		if (rv == -1) {
-			perror("server: rsetsockopt");
-			rclose(listen_rsock);
-			freeaddrinfo(servinfo);
-			return -1;
-		}
-		if (rbind(listen_rsock, p->ai_addr, p->ai_addrlen) == -1) {
- 			rclose(listen_rsock);
-			perror("server: rbind");
-			continue;
-		}
-
-		break; //if we got here - we binded successfully
-	}
-	if (p == NULL) { //if all binds failed
-		fprintf(stderr, "server: failed to bind\n");
+	listen_rsock=rsocket(AF_IB, SOCK_STREAM, 0);
+	if(listen_rsock == -1) {
+		perror("server: rsocket");
 		return -1;
 	}
-	freeaddrinfo(servinfo);
+	if (fcntl(listen_rsock, F_SETFL, O_NONBLOCK) < 0) {
+		perror("server: listen_rsock fcntl");
+		rclose(listen_rsock);
+		return -1;
+	}
+	rv = rsetsockopt(listen_rsock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+	if (rv == -1) {
+		perror("server: rsetsockopt");
+		rclose(listen_rsock);
+		return -1;
+	}
+	
+	port_num = strtol(port, NULL, 10);
+	printf("port-num=%d\n",port_num);
+
+	addr.sib_family = AF_IB;
+	addr.sib_pkey = pkey;
+	addr.sib_flowinfo = 0;
+	addr.sib_sid = htonll(((uint64_t) RDMA_PS_TCP << 16) + port_num);
+	addr.sib_sid_mask = htonll(RDMA_IB_IP_PS_MASK | RDMA_IB_IP_PORT_MASK);
+	addr.sib_scope_id = 0;
+	
+	rv = inet_pton(AF_INET6, address, &dgid);
+	if (rv <=0) {
+		perror("server: inet_pton");
+		rclose(listen_rsock);
+		return -1;
+	}
+	memcpy(&addr.sib_addr, &dgid, sizeof(dgid)); //FIXME: might cause problems
+
+	if (rbind(listen_rsock, (const struct sockaddr *) &addr, sizeof(addr)) == -1) {
+ 		rclose(listen_rsock);
+		perror("server: rbind");
+		return -1;
+	}
+
 	if (rlisten(listen_rsock, BACKLOG) == -1) {
 		perror("rlisten");
 		rclose(listen_rsock);
@@ -218,58 +233,68 @@ int server_func(const char *port)
 	return flag;
 }
 
+
+
 // --------- THE client.c CODE ----------
 
 int client_func(const char *msg, const char *serv_addr, const char *port)
 {
 	int msg_len=strlen(msg), rv, success = 1, res = 0, flag = 0;
-	int rsockfd = -1, bytes_sent, bytes_received;
+	int rsockfd = -1, bytes_sent, bytes_received, port_num;
 	char buffer[MSG_SIZE + 11];
 	char s_msg[MSG_SIZE + 1];
-	struct addrinfo hints, *servinfo, *p;
+	uint16_t pkey = 0xffff;	//from admin_connect_init
+	struct sockaddr_ib dst_addr;
+	union ibv_gid dgid;
 
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_IB;
-	hints.ai_socktype = SOCK_STREAM;
-	if (getaddrinfo(serv_addr, port, &hints, &servinfo) != 0) {
-		perror("getaddrinfo failed");
+	rsockfd = rsocket(AF_IB, SOCK_STREAM, 0);
+	if (rsockfd == -1) {
+		perror("client: rsocket");
+		return -1;
+	}
+	if (fcntl(rsockfd, F_SETFL, O_NONBLOCK) < 0) {
+		perror("client: fcntl");
+		rclose(rsockfd);
+		return -1;
+	}
+
+	port_num = strtol(port, NULL, 10);
+	printf("port-num = %d\n", port_num);
+
+	dst_addr.sib_family = AF_IB;
+	dst_addr.sib_pkey = htons(pkey);
+	dst_addr.sib_flowinfo = 0;
+	dst_addr.sib_sid = 
+		htonll(((uint64_t) RDMA_PS_TCP << 16) + port_num);
+	dst_addr.sib_sid_mask = htonll(RDMA_IB_IP_PS_MASK);
+	dst_addr.sib_scope_id = 0;
+
+	rv = inet_pton(AF_INET6, serv_addr, &dgid);
+	if (rv <= 0) {
+		perror("client: unet_pton");
+		rclose(rsockfd);
 		return -1;
 	}
 	
-	for(p = servinfo; p != NULL; p = p->ai_next) {
-		rsockfd = rsocket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if (rsockfd == -1) {
-			perror("client: rsocket");
-			continue;
-		}
-		if (fcntl(rsockfd, F_SETFL, O_NONBLOCK) < 0) {
-			perror("client: fcntl");
-			continue;
-		}
-		while (1) {
-			rv = rconnect(rsockfd, p->ai_addr, p->ai_addrlen);
-			if (rv == -1) {
-				if (errno != EWOULDBLOCK) {
-					perror("client: connect");
-					break;
-				}
-			}
-			else {
-				success = 1;
-				break;
+	memcpy(&dst_addr.sib_addr, &dgid, sizeof(dgid));
+
+	while (1) {
+		rv = rconnect(rsockfd, (const struct sockaddr *) &dst_addr,
+			sizeof(dst_addr));
+		if (rv == -1) {
+			if (errno != EWOULDBLOCK) {
+				perror("client: connect");
+				rclose(rsockfd);
+				return -1;
 			}
 		}
-		if (success == 1)
+		else {
+			success = 1;
 			break;
+		}
 	}
-	
-	if(p == NULL) {
-		fprintf(stderr, "client: failed to connect\n");
-		return -1;
-	}
-	///
-	freeaddrinfo(servinfo);
 
+	
 	while (flag == 0) {
 		bytes_sent = 0;
 		bytes_received = 0;
@@ -317,3 +342,5 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 	rclose(rsockfd);
 	return flag;
 }
+
+

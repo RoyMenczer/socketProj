@@ -13,6 +13,9 @@
 #include <poll.h>
 #include <fcntl.h>
 
+#include <rdma/rsocket.h>
+
+
 #define TIMEOUT (5 * 1000)
 #define MAX_SESSIONS 1021
 #define BACKLOG 10
@@ -41,7 +44,7 @@ int main(int argc, char *argv[])
 
 int server_func(const char *port)
 {
-	int listen_sock, new_fd;
+	int listen_rsock = -1, new_fd = -1;
 	struct addrinfo hints, *servinfo, *p;
 	struct session sessions[MAX_SESSIONS + 1];
 	struct pollfd fds[MAX_SESSIONS+1];
@@ -50,7 +53,7 @@ int server_func(const char *port)
 	int i, poll_rv, curr_size=0, num_of_fds=1, flag = 0;
 
 	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_UNSPEC;
+	hints.ai_family = AF_IB;
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
 
@@ -60,26 +63,26 @@ int server_func(const char *port)
 	}
 	for (p = servinfo; p != NULL; p = p->ai_next) {
 
-		listen_sock=socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if(listen_sock == -1) {
-			perror("server: socket");
+		listen_rsock=rsocket(p->ai_family, p->ai_socktype, p->ai_protocol);
+		if(listen_rsock == -1) {
+			perror("server: rsocket");
 			continue;
 		}
-		if (fcntl(listen_sock, F_SETFL, O_NONBLOCK) < 0) {
-			perror("server: listen_sock fcntl");
-			close(listen_sock);
+		if (fcntl(listen_rsock, F_SETFL, O_NONBLOCK) < 0) {
+			perror("server: listen_rsock fcntl");
+			rclose(listen_rsock);
 			return -1;
 		}
-		rv = setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+		rv = rsetsockopt(listen_rsock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
 		if (rv == -1) {
-			perror("server: setsockopt");
-			close(listen_sock);
+			perror("server: rsetsockopt");
+			rclose(listen_rsock);
 			freeaddrinfo(servinfo);
 			return -1;
 		}
-		if (bind(listen_sock, p->ai_addr, p->ai_addrlen) == -1) {
- 			close(listen_sock);
-			perror("server: bind");
+		if (rbind(listen_rsock, p->ai_addr, p->ai_addrlen) == -1) {
+ 			rclose(listen_rsock);
+			perror("server: rbind");
 			continue;
 		}
 
@@ -90,14 +93,14 @@ int server_func(const char *port)
 		return -1;
 	}
 	freeaddrinfo(servinfo);
-	if (listen(listen_sock, BACKLOG) == -1) {
-		perror("listen");
-		close(listen_sock);
+	if (rlisten(listen_rsock, BACKLOG) == -1) {
+		perror("rlisten");
+		rclose(listen_rsock);
 		return -1;
 	}
 
 	memset(fds, 0, sizeof(fds));
-	fds[0].fd = listen_sock;
+	fds[0].fd = listen_rsock;
 	fds[0].events = POLLIN;	
 	for (i = 1; i < MAX_SESSIONS + 1; i++) {
 		fds[i].fd = -1;
@@ -109,7 +112,7 @@ int server_func(const char *port)
 	}
 	printf("server: listening...\n");
 	while (flag == 0) {
-		poll_rv = poll(fds, num_of_fds, TIMEOUT);
+		poll_rv = rpoll(fds, num_of_fds, TIMEOUT);
 		if (poll_rv < 0) {
 			perror("server: poll");
 			flag = -1;
@@ -123,9 +126,9 @@ int server_func(const char *port)
 			if(fds[i].revents == 0)
 				continue;
 			if(fds[i].revents & (POLLHUP | POLLERR | POLLNVAL)) {
-				if(fds[i].fd == listen_sock) {
+				if(fds[i].fd == listen_rsock) {
 					flag = -1;
-					printf("problem with listening socket. terminating\n");
+					printf("problem with listening rsocket. terminating\n");
 					break;
 				}
 				printf("problem with connection number %d. closing socket\n",i);
@@ -134,10 +137,10 @@ int server_func(const char *port)
 				sessions[i].state = -1;
 			}
 			else {
-				if ((fds[i].fd == listen_sock) && (fds[i].revents & POLLIN) && (num_of_fds < (MAX_SESSIONS + 1))) {
-					new_fd = accept(listen_sock, NULL, NULL);
+				if ((fds[i].fd == listen_rsock) && (fds[i].revents & POLLIN) && (num_of_fds < (MAX_SESSIONS + 1))) {
+					new_fd = raccept(listen_rsock, NULL, NULL);
 					if (new_fd < 0 && (errno != EWOULDBLOCK)) {
-						perror("server: accept");
+						perror("server: raccept");
 						flag = -1;
 						break;
 					}
@@ -154,7 +157,7 @@ int server_func(const char *port)
 				}
 				else {
 					if ((fds[i].revents == POLLIN) && (sessions[i].state == 0)) {						
-						rv = recv(fds[i].fd, (sessions[i].r_msg + sessions[i].bytes_received), MSG_SIZE + 1 - sessions[i].bytes_received, 0);
+						rv = rrecv(fds[i].fd, (sessions[i].r_msg + sessions[i].bytes_received), MSG_SIZE + 1 - sessions[i].bytes_received, 0);
 						if (rv == -1) {
 							if (errno == EWOULDBLOCK) {
 								fds[i].revents = 0;
@@ -177,7 +180,7 @@ int server_func(const char *port)
 						continue;
 					}
 					if ((fds[i].revents == POLLOUT) && (sessions[i].state == 1)) {
-						rv = send(fds[i].fd, (sessions[i].s_msg + sessions[i].s_index), 10 + sessions[i].bytes_received - sessions[i].s_index, 0);
+						rv = rsend(fds[i].fd, (sessions[i].s_msg + sessions[i].s_index), 10 + sessions[i].bytes_received - sessions[i].s_index, 0);
 						if (rv == -1) {
 							if (errno == EWOULDBLOCK) {
 								fds[i].revents = 0;
@@ -200,8 +203,8 @@ int server_func(const char *port)
 						continue;
 					}
 					else {
-						printf("unexpected event at session number %d. closing socket\n",i);
-						close(fds[i].fd);
+						printf("unexpected event at session number %d. closing rsocket\n",i);
+						rclose(fds[i].fd);
 						fds[i].fd = -1;
 						sessions[i].state = -1;
 					}
@@ -211,7 +214,7 @@ int server_func(const char *port)
 	}
 	for (i = 0; i < num_of_fds; i++) 
 		if (fds[i].fd != -1)
-			close(fds[i].fd);
+			rclose(fds[i].fd);
 	return flag;
 }
 
@@ -220,13 +223,13 @@ int server_func(const char *port)
 int client_func(const char *msg, const char *serv_addr, const char *port)
 {
 	int msg_len=strlen(msg), rv, success = 1, res = 0, flag = 0;
-	int sockfd, bytes_sent, bytes_received;
+	int rsockfd = -1, bytes_sent, bytes_received;
 	char buffer[MSG_SIZE + 11];
 	char s_msg[MSG_SIZE + 1];
 	struct addrinfo hints, *servinfo, *p;
 
 	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_UNSPEC;
+	hints.ai_family = AF_IB;
 	hints.ai_socktype = SOCK_STREAM;
 	if (getaddrinfo(serv_addr, port, &hints, &servinfo) != 0) {
 		perror("getaddrinfo failed");
@@ -234,17 +237,17 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 	}
 	
 	for(p = servinfo; p != NULL; p = p->ai_next) {
-		sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+		rsockfd = rsocket(p->ai_family, p->ai_socktype, p->ai_protocol);
 		if (sockfd == -1) {
-			perror("client: socket");
+			perror("client: rsocket");
 			continue;
 		}
-		if (fcntl(sockfd, F_SETFL, O_NONBLOCK) < 0) {
+		if (fcntl(rsockfd, F_SETFL, O_NONBLOCK) < 0) {
 			perror("client: fcntl");
 			continue;
 		}
 		while (1) {
-			rv = connect(sockfd, p->ai_addr, p->ai_addrlen);
+			rv = rconnect(sockfd, p->ai_addr, p->ai_addrlen);
 			if (rv == -1) {
 				if (errno != EWOULDBLOCK) {
 					perror("client: connect");
@@ -275,11 +278,11 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 		strcat(s_msg, "0");
 		memset(buffer, '\0', MSG_SIZE + 10);
 		while (s_msg[bytes_sent -1] != '0') {
-			res = send(sockfd, (s_msg + bytes_sent), msg_len + 1 - bytes_sent, 0);
+			res = rsend(sockfd, (s_msg + bytes_sent), msg_len + 1 - bytes_sent, 0);
 			if (res == -1) {
 				perror("client:");
 				if (errno != EWOULDBLOCK) {
-					perror("client: send");
+					perror("client: rsend");
 					flag == -1;
 					break;
 				}
@@ -292,7 +295,7 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 			break;
 		printf("sent\n");
 		while (buffer[bytes_received -1] != '0') {
-			res = recv(sockfd, (buffer + bytes_received), MSG_SIZE + 11 - bytes_received, 0);
+			res = rrecv(sockfd, (buffer + bytes_received), MSG_SIZE + 11 - bytes_received, 0);
 			if (res == -1) {
 				perror("");
 				if(errno != EWOULDBLOCK) {
@@ -311,6 +314,6 @@ int client_func(const char *msg, const char *serv_addr, const char *port)
 		printf("\nreply from server\n '%s'\n\n", buffer);
 //		sleep(5);
 	}
-	close(sockfd);
+	rclose(sockfd);
 	return flag;
 }
